@@ -15,8 +15,11 @@ return new class extends Migration
                 $table->string('prize');
                 $table->text('description')->nullable();
                 $table->timestamp('ends_at')->nullable();
-                $table->string('seed', 64);                 // published for provable fairness
-                $table->unsignedBigInteger('winner_user_id')->nullable();
+                // Commit–reveal fairness: seed_hash is published at creation (the
+                // commitment); the raw seed is only revealed once the draw runs.
+                $table->string('seed', 64);
+                $table->string('seed_hash', 64);
+                $table->unsignedInteger('winner_user_id')->nullable();
                 $table->timestamp('drawn_at')->nullable();
                 $table->boolean('active')->default(true);
                 $table->timestamps();
@@ -27,7 +30,7 @@ return new class extends Migration
             Schema::create('giveaway_entries', function (Blueprint $table) {
                 $table->id();
                 $table->foreignId('giveaway_id')->constrained()->cascadeOnDelete();
-                $table->unsignedBigInteger('user_id');
+                $table->unsignedInteger('user_id');
                 $table->timestamp('created_at')->nullable();
                 $table->unique(['giveaway_id', 'user_id']);
             });

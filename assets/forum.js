@@ -11,6 +11,7 @@ function csrf() {
 if (c && typeof c.registerSlot === 'function') {
   c.registerSlot('forum:sidebar', {
     ext: 'convoro-giveaways',
+    label: 'Giveaway',
     order: -20,
     mount(el) {
       fetch('/api/ext/giveaways/active', { headers: { Accept: 'application/json' } })
@@ -92,6 +93,13 @@ function render(el, g) {
   }
   body.appendChild(meta);
   body.appendChild(btn);
+
+  const verify = document.createElement('a');
+  verify.href = '/giveaways/' + g.id + '/verify';
+  verify.textContent = 'Provably fair — verify';
+  verify.style.cssText = 'display:block;margin-top:9px;text-align:center;font-size:12px;font-weight:600;text-decoration:none;color:rgb(var(--c-muted,138 144 166))';
+  body.appendChild(verify);
+
   card.appendChild(head);
   card.appendChild(body);
   el.appendChild(card);

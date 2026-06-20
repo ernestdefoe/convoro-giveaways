@@ -1,15 +1,23 @@
 {
-  "id": "convoro-giveaways",
-  "name": "Giveaways",
-  "version": "1.0.0",
-  "description": "Run provably-fair giveaways in your community. Members enter with one click, and a verifiable seeded draw picks the winner — with a sidebar widget and a full admin manager.",
-  "author": "Convoro",
-  "convoro": ">=0.1.0",
-  "namespace": "Convoro\\Ext\\Giveaways\\",
-  "provider": "Convoro\\Ext\\Giveaways\\Extension",
-  "migrations": "migrations",
-  "admin_url": "/admin/ext/giveaways",
-  "assets": { "forum": "assets/forum.js" },
-  "premium": false,
-  "price": 0
+    "id": "convoro-giveaways",
+    "name": "Giveaways",
+    "version": "1.1.0",
+    "description": "Run provably-fair giveaways in your community. Members enter with one click; a commit–reveal seed makes every draw verifiable, and giveaways with an end time draw their winner automatically. Includes a sidebar widget, a public giveaways page with a built-in fairness verifier, and a themed admin manager.",
+    "author": "Convoro",
+    "convoro": ">=1.39.6",
+    "type": "extension",
+    "namespace": "Convoro\\Ext\\Giveaways\\",
+    "provider": "Convoro\\Ext\\Giveaways\\Extension",
+    "migrations": "migrations",
+    "nav": { "label": "Giveaways", "href": "/giveaways", "auth": false },
+    "admin_url": "/admin/ext/giveaways",
+    "assets": {
+        "forum": "assets/forum.js"
+    },
+    "settings": [
+        { "key": "show_widget", "label": "Show the active giveaway in the sidebar", "type": "boolean", "default": true, "help": "When off, the giveaway still appears on the Giveaways page but not in the forum sidebar." }
+    ],
+    "icon": "icon.svg",
+    "premium": false,
+    "price": 0
 }
