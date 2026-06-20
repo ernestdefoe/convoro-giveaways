@@ -35,6 +35,12 @@ function render(el, g) {
   head.style.cssText = 'display:flex;align-items:center;gap:8px;padding:12px 16px;background:rgb(var(--c-primary,91 91 214) / .10);border-bottom:1px solid rgb(var(--c-border,230 232 240))';
   head.innerHTML = '<span>🎁</span><b style="font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:rgb(var(--c-primary-700,66 66 181))">Giveaway</b>';
 
+  let imageEl = null;
+  if (g.image) {
+    imageEl = document.createElement('div');
+    imageEl.style.cssText = 'height:120px;background:#0000000d center/cover no-repeat;background-image:url("' + g.image.replace(/"/g, '%22') + '")';
+  }
+
   const body = document.createElement('div');
   body.style.cssText = 'padding:16px';
 
@@ -101,6 +107,7 @@ function render(el, g) {
   body.appendChild(verify);
 
   card.appendChild(head);
+  if (imageEl) card.appendChild(imageEl);
   card.appendChild(body);
   el.appendChild(card);
 }

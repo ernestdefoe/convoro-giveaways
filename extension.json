@@ -1,7 +1,7 @@
 {
     "id": "convoro-giveaways",
     "name": "Giveaways",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "Run provably-fair giveaways in your community. Members enter with one click; a commit–reveal seed makes every draw verifiable, and giveaways with an end time draw their winner automatically. Includes a sidebar widget, a public giveaways page with a built-in fairness verifier, and a themed admin manager.",
     "author": "Convoro",
     "convoro": ">=1.39.6",

@@ -52,6 +52,17 @@ class Extension extends ServiceProvider
         return htmlspecialchars((string) $v, ENT_QUOTES);
     }
 
+    /** Only allow http(s) / root-relative image URLs (e.g. from /uploads/image). */
+    private static function safeImage(?string $url): ?string
+    {
+        $url = trim((string) $url);
+        if ($url === '') {
+            return null;
+        }
+
+        return (str_starts_with($url, 'https://') || str_starts_with($url, 'http://') || str_starts_with($url, '/')) ? $url : null;
+    }
+
     // --- Routes ------------------------------------------------------------
 
     private function registerRoutes(): void
@@ -78,7 +89,8 @@ class Extension extends ServiceProvider
 
             return response()->json(['giveaway' => [
                 'id' => $g->id, 'title' => $g->title, 'prize' => $g->prize,
-                'description' => $g->description, 'endsAt' => optional($g->ends_at)->toIso8601String(),
+                'description' => $g->description, 'image' => self::safeImage($g->image_path),
+                'endsAt' => optional($g->ends_at)->toIso8601String(),
                 'entries' => $entries, 'entered' => $entered,
                 'authed' => (bool) $request->user(),
             ]]);
@@ -118,6 +130,7 @@ class Extension extends ServiceProvider
                 return response()->json(Giveaway::orderByDesc('id')->get()->map(function (Giveaway $g) {
                     return [
                         'id' => $g->id, 'title' => $g->title, 'prize' => $g->prize,
+                        'image' => self::safeImage($g->image_path),
                         'active' => $g->active, 'entries' => $g->entries()->count(),
                         'winner' => $g->winner_user_id ? optional(User::find($g->winner_user_id))->name : null,
                         // The commitment is always public; the raw seed is only
@@ -135,6 +148,7 @@ class Extension extends ServiceProvider
                     'title' => ['required', 'string', 'max:160'],
                     'prize' => ['required', 'string', 'max:200'],
                     'description' => ['nullable', 'string', 'max:2000'],
+                    'image_path' => ['nullable', 'string', 'max:600'],
                     'ends_at' => ['nullable', 'date'],
                 ]);
                 [$seed, $seedHash] = Draw::newSeed();
@@ -142,6 +156,7 @@ class Extension extends ServiceProvider
                 $g->title = $data['title'];
                 $g->prize = $data['prize'];
                 $g->description = $data['description'] ?? null;
+                $g->image_path = self::safeImage($data['image_path'] ?? null);
                 $g->ends_at = $data['ends_at'] ?? null;
                 $g->seed = $seed;
                 $g->seed_hash = $seedHash;
@@ -193,8 +208,10 @@ class Extension extends ServiceProvider
         $past = Giveaway::whereNotNull('drawn_at')->orderByDesc('drawn_at')->limit(20)->get();
         $names = User::whereIn('id', $past->pluck('winner_user_id')->filter()->unique())->pluck('name', 'id');
 
+        $activeImg = $active && self::safeImage($active->image_path)
+            ? '<div class="gv-card-img" style="background-image:url(\''.self::e(self::safeImage($active->image_path)).'\')"></div>' : '';
         $activeHtml = $active
-            ? '<div class="gv-card gv-active">'
+            ? '<div class="gv-card gv-active">'.$activeImg
                 .'<div class="gv-badge">🎁 Active giveaway</div>'
                 .'<h2 class="gv-t">'.self::e($active->title).'</h2>'
                 .'<div class="gv-prize">🏆 '.self::e($active->prize).'</div>'
@@ -288,6 +305,11 @@ class Extension extends ServiceProvider
             <label class="gv-f">Title</label><input id="title" placeholder="December community giveaway">
             <label class="gv-f">Prize</label><input id="prize" placeholder="$50 gift card">
             <label class="gv-f">Description (optional)</label><textarea id="description" rows="2"></textarea>
+            <label class="gv-f">Image (optional)</label>
+            <div class="gv-img-row"><div class="gv-img-prev" id="img-prev"></div>
+              <input type="file" id="img-file" accept="image/*" hidden>
+              <button type="button" class="gv-btn gv-btn-ghost" id="img-btn">Upload image</button>
+              <button type="button" class="gv-btn gv-btn-x" id="img-clear" hidden>Remove</button></div>
             <label class="gv-f">Ends at (optional — auto-draws when reached)</label><input id="ends_at" type="datetime-local">
             <div class="gv-create"><button class="gv-btn gv-btn-p" id="add">Create giveaway</button></div>
           </div>
@@ -321,11 +343,20 @@ class Extension extends ServiceProvider
               +'<div class="gv-row-a">'+actions+'</div></div>';
           }).join('');
         });}
+        var imgUrl='';
+        var prev=document.getElementById('img-prev'),fileInput=document.getElementById('img-file'),clearBtn=document.getElementById('img-clear');
+        function showImg(u){imgUrl=u||'';if(imgUrl){prev.style.backgroundImage="url('"+imgUrl+"')";prev.classList.add('has');clearBtn.hidden=false;}else{prev.style.backgroundImage='';prev.classList.remove('has');clearBtn.hidden=true;}}
+        document.getElementById('img-btn').addEventListener('click',function(){fileInput.click();});
+        clearBtn.addEventListener('click',function(){showImg('');});
+        fileInput.addEventListener('change',function(){var f=fileInput.files[0];if(!f)return;var fd=new FormData();fd.append('file',f);notify('Uploading image…');
+          fetch('/uploads/image',{method:'POST',headers:{'X-CSRF-TOKEN':csrf,Accept:'application/json'},credentials:'same-origin',body:fd})
+            .then(function(r){return r.ok?r.json():null;}).then(function(d){if(d&&d.url){showImg(d.url);notify('Image uploaded');}else notify('Upload failed','error');})
+            .catch(function(){notify('Upload failed','error');});fileInput.value='';});
         function add(){var body={title:document.getElementById('title').value.trim(),prize:document.getElementById('prize').value.trim(),
-          description:document.getElementById('description').value.trim(),ends_at:document.getElementById('ends_at').value||null};
+          description:document.getElementById('description').value.trim(),image_path:imgUrl||null,ends_at:document.getElementById('ends_at').value||null};
           if(!body.title||!body.prize){notify('Title and prize are required','error');return;}
           fetch('/admin/ext/giveaways',{method:'POST',headers:H,body:JSON.stringify(body)}).then(function(r){
-            if(r.ok){document.getElementById('title').value='';document.getElementById('prize').value='';document.getElementById('description').value='';document.getElementById('ends_at').value='';notify('Giveaway created');load();}
+            if(r.ok){document.getElementById('title').value='';document.getElementById('prize').value='';document.getElementById('description').value='';document.getElementById('ends_at').value='';showImg('');notify('Giveaway created');load();}
             else notify('Could not create','error');});}
         function draw(id){if(!confirm('Draw a winner now? This closes the giveaway and reveals the seed.'))return;
           fetch('/admin/ext/giveaways/'+id+'/draw',{method:'POST',headers:H}).then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});}).then(function(x){
@@ -372,6 +403,10 @@ class Extension extends ServiceProvider
           border:1px solid rgb(var(--c-border));background:rgb(var(--c-surface-2));color:rgb(var(--c-text))}
         .gv-card input:focus,.gv-card textarea:focus{outline:none;border-color:rgb(var(--c-primary))}
         .gv-create{margin-top:16px}
+        .gv-img-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+        .gv-img-prev{width:72px;height:72px;border-radius:10px;border:1px dashed rgb(var(--c-border));background:rgb(var(--c-surface-2)) center/cover no-repeat}
+        .gv-img-prev.has{border-style:solid}
+        .gv-card-img{width:100%;height:160px;border-radius:12px;margin-bottom:14px;background:rgb(var(--c-surface-2)) center/cover no-repeat}
         .gv-btn{font:inherit;font-size:13.5px;font-weight:700;padding:9px 15px;border-radius:10px;border:1px solid rgb(var(--c-border));
           background:rgb(var(--c-surface));color:rgb(var(--c-text));cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
         .gv-btn-p{background:rgb(var(--c-primary));border-color:rgb(var(--c-primary));color:#fff}
