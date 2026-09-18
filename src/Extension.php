@@ -52,6 +52,23 @@ class Extension extends ServiceProvider
         return htmlspecialchars((string) $v, ENT_QUOTES);
     }
 
+    private static function blankToNull(?string $v): ?string
+    {
+        $v = trim((string) $v);
+
+        return $v === '' ? null : $v;
+    }
+
+    /**
+     * Render operator-authored plain text (rules, description) as escaped HTML.
+     * Line breaks are preserved via CSS `white-space: pre-wrap`, so no markup
+     * from the author is ever interpreted.
+     */
+    private static function text(?string $v): string
+    {
+        return self::e(trim((string) $v));
+    }
+
     /** Only allow http(s) / root-relative image URLs (e.g. from /uploads/image). */
     private static function safeImage(?string $url): ?string
     {
@@ -90,6 +107,9 @@ class Extension extends ServiceProvider
             return response()->json(['giveaway' => [
                 'id' => $g->id, 'title' => $g->title, 'prize' => $g->prize,
                 'description' => $g->description, 'image' => self::safeImage($g->image_path),
+                'rules' => $g->rules,
+                // The question is public; the expected answer never leaves the server.
+                'skillQuestion' => $g->requiresSkillAnswer() ? $g->skill_question : null,
                 'endsAt' => optional($g->ends_at)->toIso8601String(),
                 'entries' => $entries, 'entered' => $entered,
                 'authed' => (bool) $request->user(),
@@ -102,6 +122,18 @@ class Extension extends ServiceProvider
             abort_if(! $g, 404);
             if ($g->hasEnded()) {
                 return response()->json(['ok' => false, 'message' => 'This giveaway has ended.'], 422);
+            }
+            // Where required, entry is only valid once the skill-testing question
+            // is answered correctly — that is what keeps it a game of skill
+            // rather than a pure lottery.
+            if ($g->requiresSkillAnswer() && ! $g->skillAnswerMatches($request->input('answer'))) {
+                return response()->json([
+                    'ok' => false,
+                    'skillQuestion' => $g->skill_question,
+                    'message' => trim((string) $request->input('answer')) === ''
+                        ? 'Answer the skill-testing question to enter.'
+                        : 'That answer isn\'t right — try again.',
+                ], 422);
             }
             GiveawayEntry::updateOrCreate(
                 ['giveaway_id' => $id, 'user_id' => $request->user()->id],
@@ -132,6 +164,8 @@ class Extension extends ServiceProvider
                         'id' => $g->id, 'title' => $g->title, 'prize' => $g->prize,
                         'image' => self::safeImage($g->image_path),
                         'active' => $g->active, 'entries' => $g->entries()->count(),
+                        'hasRules' => trim((string) $g->rules) !== '',
+                        'skillQuestion' => $g->requiresSkillAnswer() ? $g->skill_question : null,
                         'winner' => $g->winner_user_id ? optional(User::find($g->winner_user_id))->name : null,
                         // The commitment is always public; the raw seed is only
                         // revealed after the draw.
@@ -148,6 +182,9 @@ class Extension extends ServiceProvider
                     'title' => ['required', 'string', 'max:160'],
                     'prize' => ['required', 'string', 'max:200'],
                     'description' => ['nullable', 'string', 'max:2000'],
+                    'rules' => ['nullable', 'string', 'max:20000'],
+                    'skill_question' => ['nullable', 'string', 'max:300'],
+                    'skill_answer' => ['nullable', 'string', 'max:120', 'required_with:skill_question'],
                     'image_path' => ['nullable', 'string', 'max:600'],
                     'ends_at' => ['nullable', 'date'],
                 ]);
@@ -156,6 +193,9 @@ class Extension extends ServiceProvider
                 $g->title = $data['title'];
                 $g->prize = $data['prize'];
                 $g->description = $data['description'] ?? null;
+                $g->rules = self::blankToNull($data['rules'] ?? null);
+                $g->skill_question = self::blankToNull($data['skill_question'] ?? null);
+                $g->skill_answer = $g->skill_question ? self::blankToNull($data['skill_answer'] ?? null) : null;
                 $g->image_path = self::safeImage($data['image_path'] ?? null);
                 $g->ends_at = $data['ends_at'] ?? null;
                 $g->seed = $seed;
@@ -202,6 +242,31 @@ class Extension extends ServiceProvider
 
     // --- Public pages ------------------------------------------------------
 
+    /**
+     * Collapsible "Official rules" block. Rules are often required to be
+     * published in full (eligibility, selection method, deadlines, odds…) and
+     * can run long, so they live behind a disclosure rather than stretching the
+     * card. Rendered as escaped plain text with line breaks preserved.
+     */
+    private static function rulesHtml(Giveaway $g, bool $open = false): string
+    {
+        $blocks = '';
+        if ($g->requiresSkillAnswer()) {
+            $blocks .= '<div class="gv-skill"><span class="gv-k">Skill-testing question</span>'
+                .'<div class="gv-skill-q">'.self::text($g->skill_question).'</div>'
+                .'<span class="gv-note">Entrants must answer this correctly for their entry to count.</span></div>';
+        }
+        if (trim((string) $g->rules) !== '') {
+            $blocks .= '<div class="gv-rules-body">'.self::text($g->rules).'</div>';
+        }
+        if ($blocks === '') {
+            return '';
+        }
+
+        return '<details class="gv-rules"'.($open ? ' open' : '').'>'
+            .'<summary class="gv-rules-s">📋 Official rules</summary>'.$blocks.'</details>';
+    }
+
     private static function indexPage(): \Inertia\Response
     {
         $active = Giveaway::where('active', true)->orderByDesc('id')->first();
@@ -218,6 +283,7 @@ class Extension extends ServiceProvider
                 .($active->description ? '<p class="gv-desc">'.self::e($active->description).'</p>' : '')
                 .'<div class="gv-meta">'.number_format($active->entries()->count()).' entries'
                 .($active->ends_at ? ' · ends '.self::e($active->ends_at->toFormattedDayDateString()) : '').'</div>'
+                .self::rulesHtml($active)
                 .'<div class="gv-actions"><a class="gv-btn gv-btn-p" href="/giveaways/'.$active->id.'/verify">Verify fairness</a></div>'
                 .'</div>'
             : '<div class="gv-blank"><div class="gv-blank-ico">🎁</div><div class="gv-blank-t">No active giveaway right now</div><p class="gv-muted">Check back soon.</p></div>';
@@ -285,7 +351,7 @@ class Extension extends ServiceProvider
             .'<h1 class="gv-h2">'.self::e($g->title).'</h1><div class="gv-prize">🏆 '.self::e($g->prize).'</div>'
             .'<div class="gv-how">Winner = the entrant whose <code>sha256(seed : user-id)</code> is lowest. '
             .'The seed is committed (hashed) before entries open and revealed at the draw, so the operator can\'t change it after the fact.</div>'
-            .$commit.$reveal.'</div></div>';
+            .self::rulesHtml($g).$commit.$reveal.'</div></div>';
 
         return ExtPage::render('Verify giveaway', $body, self::css(), $js);
     }
@@ -305,6 +371,14 @@ class Extension extends ServiceProvider
             <label class="gv-f">Title</label><input id="title" placeholder="December community giveaway">
             <label class="gv-f">Prize</label><input id="prize" placeholder="$50 gift card">
             <label class="gv-f">Description (optional)</label><textarea id="description" rows="2"></textarea>
+            <label class="gv-f">Official rules (optional)</label>
+            <textarea id="rules" rows="8" placeholder="Who may enter, how and when the winner is selected, the entry deadline, how the winner is contacted, odds of winning, sponsor details…"></textarea>
+            <p class="gv-help">Shown in full on the Giveaways page, the sidebar widget and the giveaway's permanent verification page. Plain text — line breaks are kept.</p>
+            <label class="gv-f">Skill-testing question (optional)</label>
+            <input id="skill_question" placeholder="What is 12 + 7 × 2?">
+            <label class="gv-f">Correct answer</label>
+            <input id="skill_answer" placeholder="26">
+            <p class="gv-help">Where a pure game of chance isn't allowed, entrants must answer this correctly before their entry counts. Matching ignores case, spaces and thousands separators.</p>
             <label class="gv-f">Image (optional)</label>
             <div class="gv-img-row"><div class="gv-img-prev" id="img-prev"></div>
               <input type="file" id="img-file" accept="image/*" hidden>
@@ -332,13 +406,14 @@ class Extension extends ServiceProvider
             var status=g.drawnAt?'drawn':(g.active?'on':'off');
             var win=g.winner?(' · winner: <span class="gv-win">'+esc(g.winner)+'</span>'):'';
             var seedLine=g.seed?('seed: '+esc(g.seed)):('commit: '+esc(g.seedHash));
+            var extras=(g.hasRules?' · <span class="gv-flag">rules</span>':'')+(g.skillQuestion?' · <span class="gv-flag">skill question</span>':'');
             var actions='<a class="gv-btn gv-btn-ghost" href="/giveaways/'+g.id+'/verify" target="_blank">Verify</a>';
             if(!g.drawnAt){actions='<button class="gv-btn gv-btn-ghost" data-act="draw" data-id="'+g.id+'">Draw winner</button>'
               +'<button class="gv-btn gv-btn-ghost" data-act="tog" data-id="'+g.id+'">'+(g.active?'Close':'Reopen')+'</button>'+actions;}
             actions+='<button class="gv-btn gv-btn-x" data-act="del" data-id="'+g.id+'">Delete</button>';
             return '<div class="gv-row"><span class="gv-dot gv-'+status+'"></span>'
               +'<div class="gv-row-b"><div class="gv-row-t">'+esc(g.title)+' — '+esc(g.prize)+'</div>'
-              +'<span class="gv-tag">'+g.entries+' entries'+win+'</span>'
+              +'<span class="gv-tag">'+g.entries+' entries'+win+extras+'</span>'
               +'<div class="gv-seed">'+seedLine+'</div></div>'
               +'<div class="gv-row-a">'+actions+'</div></div>';
           }).join('');
@@ -352,11 +427,15 @@ class Extension extends ServiceProvider
           fetch('/uploads/image',{method:'POST',headers:{'X-CSRF-TOKEN':csrf,Accept:'application/json'},credentials:'same-origin',body:fd})
             .then(function(r){return r.ok?r.json():null;}).then(function(d){if(d&&d.url){showImg(d.url);notify('Image uploaded');}else notify('Upload failed','error');})
             .catch(function(){notify('Upload failed','error');});fileInput.value='';});
-        function add(){var body={title:document.getElementById('title').value.trim(),prize:document.getElementById('prize').value.trim(),
-          description:document.getElementById('description').value.trim(),image_path:imgUrl||null,ends_at:document.getElementById('ends_at').value||null};
+        var FIELDS=['title','prize','description','rules','skill_question','skill_answer','ends_at'];
+        function val(id){return (document.getElementById(id).value||'').trim();}
+        function add(){var body={title:val('title'),prize:val('prize'),description:val('description'),
+          rules:val('rules')||null,skill_question:val('skill_question')||null,skill_answer:val('skill_answer')||null,
+          image_path:imgUrl||null,ends_at:document.getElementById('ends_at').value||null};
           if(!body.title||!body.prize){notify('Title and prize are required','error');return;}
+          if(body.skill_question&&!body.skill_answer){notify('Give the correct answer to the skill-testing question','error');return;}
           fetch('/admin/ext/giveaways',{method:'POST',headers:H,body:JSON.stringify(body)}).then(function(r){
-            if(r.ok){document.getElementById('title').value='';document.getElementById('prize').value='';document.getElementById('description').value='';document.getElementById('ends_at').value='';showImg('');notify('Giveaway created');load();}
+            if(r.ok){FIELDS.forEach(function(id){document.getElementById(id).value='';});showImg('');notify('Giveaway created');load();}
             else notify('Could not create','error');});}
         function draw(id){if(!confirm('Draw a winner now? This closes the giveaway and reveals the seed.'))return;
           fetch('/admin/ext/giveaways/'+id+'/draw',{method:'POST',headers:H}).then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});}).then(function(x){
@@ -445,6 +524,19 @@ class Extension extends ServiceProvider
         .gv-check{margin-top:16px;font-size:13.5px;font-weight:600;padding:11px 13px;border-radius:10px;background:rgb(var(--c-surface-2));color:rgb(var(--c-text-2))}
         .gv-ok{background:rgba(16,185,129,.12);color:#059669}
         .gv-bad{background:rgba(229,72,77,.12);color:#e5484d}
+        .gv-rules{margin:0 0 14px;border:1px solid rgb(var(--c-border));border-radius:12px;background:rgb(var(--c-surface-2))}
+        .gv-rules-s{cursor:pointer;list-style:none;padding:11px 14px;font-size:13.5px;font-weight:700;color:rgb(var(--c-text-2))}
+        .gv-rules-s::-webkit-details-marker{display:none}
+        .gv-rules-s::after{content:'▾';float:right;font-size:11px;opacity:.6}
+        .gv-rules[open] .gv-rules-s::after{content:'▴'}
+        .gv-rules[open] .gv-rules-s{border-bottom:1px solid rgb(var(--c-border))}
+        .gv-rules-body{white-space:pre-wrap;padding:12px 14px 14px;font-size:13.5px;line-height:1.65;color:rgb(var(--c-text-2));
+          max-height:420px;overflow:auto;overflow-wrap:anywhere}
+        .gv-skill{padding:12px 14px}
+        .gv-skill+.gv-rules-body{border-top:1px solid rgb(var(--c-border))}
+        .gv-skill-q{font-size:14px;font-weight:700;color:rgb(var(--c-text));margin:0 0 4px}
+        .gv-help{font-size:12px;color:rgb(var(--c-muted));line-height:1.5;margin:6px 0 0}
+        .gv-flag{color:rgb(var(--c-primary));font-weight:600}
         CSS;
     }
 }

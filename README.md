@@ -18,6 +18,15 @@ Free, first-party, MIT-licensed. Requires Convoro core **≥ 1.39.6**.
 - **Scheduled auto-draws** — give a giveaway an end time and it draws itself.
   Runs every minute via the host scheduler (`php artisan schedule:run`), with an
   opportunistic fallback so winners are still drawn on hosts without cron.
+- **Official rules** — publish long-form terms (eligibility, how the winner is
+  selected, deadlines, sponsor, odds) with each giveaway. They appear on the
+  Giveaways page, in the sidebar widget and on the giveaway's permanent
+  verification page, so the rules stay on the record after the draw.
+- **Skill-testing question** — optionally require entrants to answer a question
+  correctly before their entry counts, for jurisdictions (Canada among them)
+  where a pure game of chance would be an illegal lottery. Answers are checked
+  server-side; case, spaces and thousands separators are ignored, and numeric
+  answers compare as numbers.
 - **Public Giveaways page** — the active giveaway plus a list of past winners,
   each linking to its fairness proof.
 - **Themed admin manager** — create, draw, open/close and delete giveaways from
@@ -28,7 +37,8 @@ Free, first-party, MIT-licensed. Requires Convoro core **≥ 1.39.6**.
 1. **Commit** — on creation a CSPRNG seed is generated; only `sha256(seed)` is
    published. The operator cannot change the seed afterwards without breaking the
    commitment.
-2. **Enter** — members enter; entries are one-per-user and counted publicly.
+2. **Enter** — members enter; entries are one-per-user and counted publicly. If
+   a skill-testing question is set, only a correct answer creates an entry.
 3. **Reveal & draw** — the seed is revealed and the winner is the entrant
    minimising `sha256(seed : user-id)` over the (published) entrant list.
 4. **Verify** — anyone can recompute it from the revealed seed + entrant ids and
@@ -36,6 +46,7 @@ Free, first-party, MIT-licensed. Requires Convoro core **≥ 1.39.6**.
 
 ## Install
 
-Install from the Convoro Marketplace. Optionally toggle the sidebar widget under
-**Admin → Extensions → Giveaways**. For scheduled auto-draws, make sure your
+Install from the Convoro Marketplace. Create giveaways — including their rules
+and skill-testing question — under **Admin → Extensions → Giveaways**, where you
+can also toggle the sidebar widget. For scheduled auto-draws, make sure your
 host runs Laravel's scheduler (`* * * * * php artisan schedule:run`).
