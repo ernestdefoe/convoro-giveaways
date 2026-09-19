@@ -62,6 +62,7 @@ class Extension extends ServiceProvider
             'rules' => ['nullable', 'string', 'max:20000'],
             'skill_question' => ['nullable', 'string', 'max:300'],
             'skill_answer' => ['nullable', 'string', 'max:120', 'required_with:skill_question'],
+            'skill_attempt_limit' => ['nullable', 'integer', 'min:0', 'max:10'],
             'image_path' => ['nullable', 'string', 'max:600'],
             'ends_at' => ['nullable', 'date'],
         ];
@@ -80,6 +81,7 @@ class Extension extends ServiceProvider
         $g->rules = self::blankToNull($data['rules'] ?? null);
         $g->skill_question = self::blankToNull($data['skill_question'] ?? null);
         $g->skill_answer = $g->skill_question ? self::blankToNull($data['skill_answer'] ?? null) : null;
+        $g->skill_attempt_limit = $g->skill_question ? max(0, min(10, (int) ($data['skill_attempt_limit'] ?? 0))) : 0;
         $g->image_path = self::safeImage($data['image_path'] ?? null);
         $g->ends_at = $data['ends_at'] ?? null;
     }
@@ -180,13 +182,38 @@ class Extension extends ServiceProvider
             if (! $g->requiresSkillAnswer()) {
                 return response()->json(['ok' => false, 'message' => 'This giveaway has no skill-testing question.'], 422);
             }
-            $answer = $request->input('answer');
-            if (! $g->skillAnswerMatches(is_string($answer) ? $answer : null)) {
+            $answer = is_string($request->input('answer')) ? trim($request->input('answer')) : '';
+
+            // No answer is not a wrong answer: it never burns an attempt.
+            if ($answer === '') {
+                return response()->json(['ok' => false, 'message' => 'Answer the skill-testing question to claim your prize.'], 422);
+            }
+
+            if (! $g->skillAnswerMatches($answer)) {
+                $g->skill_attempts = (int) $g->skill_attempts + 1;
+                $limit = $g->skillAttemptLimit();
+
+                if ($limit > 0 && $g->skill_attempts >= $limit) {
+                    // Out of attempts: forfeit, and promote the next-lowest
+                    // hash under the same published seed.
+                    $g->save();
+                    Draw::forfeitAndRedraw($g->id);
+
+                    return response()->json([
+                        'ok' => false, 'forfeited' => true,
+                        'message' => 'That was your last attempt, so the prize has been redrawn.',
+                    ], 422);
+                }
+
+                $g->save();
+                $left = $limit > 0 ? $limit - $g->skill_attempts : null;
+
                 return response()->json([
                     'ok' => false,
-                    'message' => trim((string) $answer) === ''
-                        ? 'Answer the skill-testing question to claim your prize.'
-                        : 'That answer isn\'t right — check the question and try again.',
+                    'attemptsLeft' => $left,
+                    'message' => $left === null
+                        ? 'That answer isn\'t right — check the question and try again.'
+                        : 'That answer isn\'t right — '.$left.' '.($left === 1 ? 'attempt' : 'attempts').' left before the prize is redrawn.',
                 ], 422);
             }
             $g->skill_verified_at = now();
@@ -219,6 +246,7 @@ class Extension extends ServiceProvider
                         'hasRules' => trim((string) $g->rules) !== '',
                         'skillQuestion' => $g->requiresSkillAnswer() ? $g->skill_question : null,
                         'awaitingSkill' => $g->awaitingSkillAnswer(),
+                        'forfeits' => count($g->forfeitedUserIds()),
                         'skillVerifiedAt' => optional($g->skill_verified_at)->toIso8601String(),
                         'winner' => $g->winner_user_id ? optional(User::find($g->winner_user_id))->name : null,
                         // The commitment is always public; the raw seed is only
@@ -254,6 +282,7 @@ class Extension extends ServiceProvider
                     'id' => $g->id, 'title' => $g->title, 'prize' => $g->prize,
                     'description' => $g->description, 'rules' => $g->rules,
                     'skill_question' => $g->skill_question, 'skill_answer' => $g->skill_answer,
+                    'skill_attempt_limit' => (int) $g->skill_attempt_limit,
                     'image_path' => self::safeImage($g->image_path),
                     // datetime-local wants 'Y-m-dTH:i' in the site's timezone.
                     'ends_at' => optional($g->ends_at)->format('Y-m-d\\TH:i'),
@@ -326,7 +355,12 @@ class Extension extends ServiceProvider
         if ($g->requiresSkillAnswer()) {
             $blocks .= '<div class="gv-skill"><span class="gv-k">Skill-testing question</span>'
                 .'<div class="gv-skill-q">'.self::text($g->skill_question).'</div>'
-                .'<span class="gv-note">The drawn winner must answer this correctly before the prize is awarded.</span></div>';
+                .'<span class="gv-note">The drawn winner must answer this correctly before the prize is awarded.'
+                .($g->skillAttemptLimit() > 0
+                    ? ' After '.$g->skillAttemptLimit().' wrong '.($g->skillAttemptLimit() === 1 ? 'answer' : 'answers')
+                        .', the prize is redrawn for the next entrant the draw seed picks.'
+                    : '')
+                .'</span></div>';
         }
         if (trim((string) $g->rules) !== '') {
             $blocks .= '<div class="gv-rules-body">'.self::text($g->rules).'</div>';
@@ -359,17 +393,35 @@ class Extension extends ServiceProvider
             ->get()
             ->filter(fn (Giveaway $g) => $g->requiresSkillAnswer());
 
-        if ($pending->isEmpty()) {
+        // Someone who forfeited is told so, rather than watching their panel
+        // quietly disappear.
+        $forfeited = Giveaway::whereNotNull('forfeited_user_ids')
+            ->whereNotNull('drawn_at')
+            ->orderByDesc('drawn_at')->limit(20)->get()
+            ->filter(fn (Giveaway $g) => in_array((int) $user->id, $g->forfeitedUserIds(), true));
+
+        if ($pending->isEmpty() && $forfeited->isEmpty()) {
             return ['', ''];
         }
 
         $html = '';
+        foreach ($forfeited as $g) {
+            $html .= '<div class="gv-won gv-won-lost">'
+                .'<div class="gv-won-h">The prize has been redrawn — '.self::e($g->title).'</div>'
+                .'<p class="gv-won-sub">The skill-testing question wasn\'t answered correctly in the attempts allowed, '
+                .'so the prize passed to the next entrant the draw seed picks. '
+                .'<a href="/giveaways/'.$g->id.'/verify">See the proof</a>.</p></div>';
+        }
         foreach ($pending as $g) {
             $html .= '<div class="gv-won" data-id="'.(int) $g->id.'">'
                 .'<div class="gv-won-h">🎉 You won — '.self::e($g->title).'</div>'
                 .'<div class="gv-prize">🏆 '.self::e($g->prize).'</div>'
                 .'<p class="gv-won-sub">Before your prize can be awarded, answer this skill-testing question.</p>'
                 .'<div class="gv-skill-q">'.self::text($g->skill_question).'</div>'
+                .($g->skillAttemptLimit() > 0
+                    ? '<div class="gv-attempts">'.max(0, $g->skillAttemptLimit() - (int) $g->skill_attempts)
+                        .' attempts left — if you run out, the prize is redrawn.</div>'
+                    : '')
                 .'<div class="gv-won-row"><input class="gv-ans" type="text" autocomplete="off" placeholder="Your answer">'
                 .'<button type="button" class="gv-btn gv-btn-p gv-claim">Claim prize</button></div>'
                 .'<div class="gv-won-msg"></div></div>';
@@ -461,6 +513,7 @@ class Extension extends ServiceProvider
     {
         $drawn = $g->drawn_at !== null;
         $ids = GiveawayEntry::where('giveaway_id', $g->id)->orderBy('user_id')->pluck('user_id')->all();
+        $forfeited = $g->forfeitedUserIds();
         $winnerName = $g->winner_user_id ? (optional(User::find($g->winner_user_id))->name ?? 'Member') : null;
 
         $commit = '<div class="gv-kv"><span class="gv-k">Commitment (published at creation)</span>'
@@ -470,7 +523,15 @@ class Extension extends ServiceProvider
         if ($drawn) {
             $reveal = '<div class="gv-kv"><span class="gv-k">Revealed seed</span><code class="gv-code" id="gv-seed">'.self::e($g->seed).'</code></div>'
                 .'<div class="gv-kv"><span class="gv-k">Entrants ('.count($ids).')</span><code class="gv-code" id="gv-ids">'.self::e(implode(',', $ids)).'</code></div>'
-                .'<div class="gv-kv"><span class="gv-k">Recorded winner</span><span class="gv-win" id="gv-winner" data-id="'.(int) $g->winner_user_id.'">'.self::e($winnerName).' (user #'.(int) $g->winner_user_id.')</span></div>'
+                .'<div class="gv-kv"><span class="gv-k">Forfeited ('.count($forfeited).')</span>'
+                .'<code class="gv-code" id="gv-forf">'.self::e(implode(',', $forfeited)).'</code>'
+                .'<span class="gv-note">'.($forfeited
+                    ? 'These entrants were drawn first but did not answer the skill-testing question, so they are excluded and the next-lowest hash wins.'
+                    : 'No one has forfeited — the winner is the lowest hash over the whole entrant list.').'</span></div>'
+                .'<div class="gv-kv"><span class="gv-k">Recorded winner</span><span class="gv-win" id="gv-winner" data-id="'.($g->winner_user_id ? (int) $g->winner_user_id : '').'">'
+                .($g->winner_user_id
+                    ? self::e($winnerName).' (user #'.(int) $g->winner_user_id.')'
+                    : '— none: every entrant forfeited').'</span></div>'
                 .'<div class="gv-check" id="gv-check">Recomputing in your browser…</div>';
             $js = <<<JS
             async function h(s){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');}
@@ -478,14 +539,21 @@ class Extension extends ServiceProvider
               var seed=document.getElementById('gv-seed').textContent.trim();
               var idsTxt=document.getElementById('gv-ids').textContent.trim();
               var ids=idsTxt?idsTxt.split(',').map(function(x){return x.trim();}).filter(Boolean):[];
+              // A forfeited entrant is excluded from selection: the winner is the
+              // lowest hash among those who did NOT forfeit. The list is published
+              // above, so this stays a pure function of (seed, entrants, forfeits).
+              var forfTxt=document.getElementById('gv-forf').textContent.trim();
+              var forf=forfTxt?forfTxt.split(',').map(function(x){return x.trim();}).filter(Boolean):[];
+              if(forf.length){ids=ids.filter(function(id){return forf.indexOf(id)===-1;});}
               var recordedHash=document.getElementById('gv-hash').textContent.trim();
               var recordedWinner=document.getElementById('gv-winner').getAttribute('data-id');
               var check=document.getElementById('gv-check');
               var seedOk=(await h(seed))===recordedHash;
               var best=null,bestH=null;
               for(var i=0;i<ids.length;i++){var hv=await h(seed+':'+ids[i]);if(bestH===null||hv<bestH){bestH=hv;best=ids[i];}}
-              var winnerOk=String(best)===String(recordedWinner);
-              if(seedOk&&winnerOk){check.className='gv-check gv-ok';check.textContent='✓ Verified — sha256(seed) matches the commitment, and the winner is the entrant with the lowest sha256(seed:id).';}
+              // No recorded winner is correct only if nobody eligible was left.
+              var winnerOk=recordedWinner?String(best)===String(recordedWinner):best===null;
+              if(seedOk&&winnerOk){check.className='gv-check gv-ok';check.textContent='✓ Verified — sha256(seed) matches the commitment, and the winner is the entrant with the lowest sha256(seed:id)'+(forf.length?' among those who did not forfeit':'')+'.';}
               else{check.className='gv-check gv-bad';check.textContent='✗ Verification failed'+(seedOk?'':' — seed does not match the published commitment')+(winnerOk?'':' — recomputed winner differs from the recorded one')+'.';}
             })();
             JS;
@@ -499,7 +567,8 @@ class Extension extends ServiceProvider
             .'<div class="gv-card"><div class="gv-badge">'.($drawn ? '✅ Drawn' : '⏳ Open').'</div>'
             .'<h1 class="gv-h2">'.self::e($g->title).'</h1><div class="gv-prize">🏆 '.self::e($g->prize).'</div>'
             .'<div class="gv-how">Winner = the entrant whose <code>sha256(seed : user-id)</code> is lowest. '
-            .'The seed is committed (hashed) before entries open and revealed at the draw, so the operator can\'t change it after the fact.</div>'
+            .'The seed is committed (hashed) before entries open and revealed at the draw, so the operator can\'t change it after the fact.'
+            .($forfeited ? ' A winner who fails the skill-testing question forfeits and is excluded; the prize passes to the next-lowest hash, which is why the forfeited list is published below — the redraw is not a fresh draw.' : '').'</div>'
             .self::rulesHtml($g).$commit.$reveal.'</div></div>';
 
         return ExtPage::render('Verify giveaway', $body, self::css(), $js);
@@ -528,7 +597,9 @@ class Extension extends ServiceProvider
             <input id="skill_question" placeholder="What is 12 + 7 × 2?">
             <label class="gv-f">Correct answer</label>
             <input id="skill_answer" placeholder="26">
-            <p class="gv-help">Where a pure game of chance isn't allowed, the drawn winner must answer this correctly before the prize is awarded — entering stays one click. Matching ignores case, spaces and thousands separators.</p>
+            <label class="gv-f">Attempts before forfeit</label>
+            <input id="skill_attempt_limit" type="number" min="0" max="10" placeholder="0">
+            <p class="gv-help">Where a pure game of chance isn't allowed, the drawn winner must answer this correctly before the prize is awarded — entering stays one click. Matching ignores case, spaces and thousands separators. Attempts before forfeit: how many wrong answers the winner may give before the prize is redrawn for the next entrant the seed picks — 0 lets them keep trying.</p>
             <label class="gv-f">Image (optional)</label>
             <div class="gv-img-row"><div class="gv-img-prev" id="img-prev"></div>
               <input type="file" id="img-file" accept="image/*" hidden>
@@ -559,7 +630,8 @@ class Extension extends ServiceProvider
             var seedLine=g.seed?('seed: '+esc(g.seed)):('commit: '+esc(g.seedHash));
             var skill=g.skillQuestion?(g.awaitingSkill?' · <span class="gv-warn">awaiting winner\'s answer</span>'
               :(g.skillVerifiedAt?' · <span class="gv-win">winner answered ✓</span>':' · <span class="gv-flag">skill question</span>')):'';
-            var extras=(g.hasRules?' · <span class="gv-flag">rules</span>':'')+skill;
+            var forf=g.forfeits?(' · <span class="gv-warn">'+g.forfeits+' forfeited</span>'):'';
+            var extras=(g.hasRules?' · <span class="gv-flag">rules</span>':'')+skill+forf;
             var actions='<a class="gv-btn gv-btn-ghost" href="/giveaways/'+g.id+'/verify" target="_blank">Verify</a>';
             if(!g.drawnAt){actions='<button class="gv-btn gv-btn-ghost" data-act="edit" data-id="'+g.id+'">Edit</button>'
               +'<button class="gv-btn gv-btn-ghost" data-act="draw" data-id="'+g.id+'">Draw winner</button>'
@@ -581,7 +653,7 @@ class Extension extends ServiceProvider
           fetch('/uploads/image',{method:'POST',headers:{'X-CSRF-TOKEN':csrf,Accept:'application/json'},credentials:'same-origin',body:fd})
             .then(function(r){return r.ok?r.json():null;}).then(function(d){if(d&&d.url){showImg(d.url);notify('Image uploaded');}else notify('Upload failed','error');})
             .catch(function(){notify('Upload failed','error');});fileInput.value='';});
-        var FIELDS=['title','prize','description','rules','skill_question','skill_answer','ends_at'];
+        var FIELDS=['title','prize','description','rules','skill_question','skill_answer','skill_attempt_limit','ends_at'];
         function val(id){return (document.getElementById(id).value||'').trim();}
         function set(id,v){document.getElementById(id).value=v||'';}
         var editingId=null;
@@ -593,7 +665,8 @@ class Extension extends ServiceProvider
           if(!g){notify('Could not load that giveaway','error');return;}
           editingId=g.id;
           set('title',g.title);set('prize',g.prize);set('description',g.description);set('rules',g.rules);
-          set('skill_question',g.skill_question);set('skill_answer',g.skill_answer);set('ends_at',g.ends_at);
+          set('skill_question',g.skill_question);set('skill_answer',g.skill_answer);
+          set('skill_attempt_limit',g.skill_attempt_limit||0);set('ends_at',g.ends_at);
           showImg(g.image_path||'');
           document.getElementById('form-h').textContent='Editing: '+g.title;
           document.getElementById('add').textContent='Save changes';
@@ -601,6 +674,7 @@ class Extension extends ServiceProvider
           document.getElementById('form-card').scrollIntoView({behavior:'smooth',block:'start'});});}
         function add(){var body={title:val('title'),prize:val('prize'),description:val('description'),
           rules:val('rules')||null,skill_question:val('skill_question')||null,skill_answer:val('skill_answer')||null,
+          skill_attempt_limit:parseInt(val('skill_attempt_limit'),10)||0,
           image_path:imgUrl||null,ends_at:document.getElementById('ends_at').value||null};
           if(!body.title||!body.prize){notify('Title and prize are required','error');return;}
           if(body.skill_question&&!body.skill_answer){notify('Give the correct answer to the skill-testing question','error');return;}
@@ -727,6 +801,10 @@ class Extension extends ServiceProvider
         .gv-won-msg:not(:empty){margin-top:12px;font-size:13.5px;font-weight:600;padding:10px 12px;border-radius:10px}
         .gv-won-msg.gv-ok{background:rgba(16,185,129,.12);color:#059669}
         .gv-won-msg.gv-bad{background:rgba(229,72,77,.12);color:#e5484d}
+        .gv-won-lost{border-color:rgb(var(--c-border));background:rgb(var(--c-surface-2))}
+        .gv-won-lost .gv-won-h{color:rgb(var(--c-text-2))}
+        .gv-won-lost a{color:rgb(var(--c-primary));font-weight:600;text-decoration:none}
+        .gv-attempts{font-size:12.5px;font-weight:600;color:#d97706;margin-bottom:10px}
         CSS;
     }
 }

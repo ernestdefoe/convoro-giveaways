@@ -28,7 +28,10 @@ Free, first-party, MIT-licensed. Requires Convoro core **≥ 1.39.6**.
   stays one click; the winner answers on the Giveaways page after the draw, and
   the giveaway records when they passed. Answers are checked server-side; case,
   spaces and thousands separators are ignored, and numeric answers compare as
-  numbers.
+  numbers. Optionally set how many wrong answers are allowed before the winner
+  forfeits: the prize then passes to the next-lowest `sha256(seed : user-id)`,
+  with the forfeited ids published on the verification page so the redraw is
+  still reproducible by anyone.
 - **Public Giveaways page** — the active giveaway plus a list of past winners,
   each linking to its fairness proof.
 - **Themed admin manager** — create, edit, draw, open/close and delete giveaways
@@ -49,6 +52,10 @@ Free, first-party, MIT-licensed. Requires Convoro core **≥ 1.39.6**.
 5. **Claim** — if a skill-testing question is set, the winner answers it before
    the prize is awarded. The draw itself is unaffected: the question qualifies
    the award, not the entry.
+6. **Forfeit (optional)** — a winner who runs out of attempts forfeits, and the
+   prize goes to the next-lowest hash among entrants who haven't forfeited. The
+   seed and its commitment never change; only the published exclusion list
+   grows, so the verifier still recomputes the result exactly.
 
 ## Install
 

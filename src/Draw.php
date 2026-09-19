@@ -29,9 +29,21 @@ class Draw
         return [$seed, hash('sha256', $seed)];
     }
 
-    /** Pure winner selection: lowest sha256(seed:userId). */
-    public static function winnerFor(string $seed, array $userIds): ?int
+    /**
+     * Pure winner selection: lowest sha256(seed:userId).
+     *
+     * $forfeited ids are excluded — a winner who fails the skill-testing
+     * question forfeits, and the prize passes to the next-lowest hash. The
+     * forfeited list is published alongside the seed, so the result stays a
+     * pure function of (seed, entrants, forfeits) and anyone can recompute it.
+     */
+    public static function winnerFor(string $seed, array $userIds, array $forfeited = []): ?int
     {
+        if ($forfeited) {
+            $forfeited = array_map('intval', $forfeited);
+            $userIds = array_values(array_filter($userIds, fn ($uid) => ! in_array((int) $uid, $forfeited, true)));
+        }
+
         if (! $userIds) {
             return null;
         }
@@ -63,7 +75,7 @@ class Draw
 
             $userIds = GiveawayEntry::where('giveaway_id', $g->id)
                 ->orderBy('user_id')->pluck('user_id')->all();
-            $winner = self::winnerFor($g->seed, $userIds);
+            $winner = self::winnerFor($g->seed, $userIds, $g->forfeitedUserIds());
             if ($winner === null) {
                 return null; // no entries — leave it open
             }
@@ -74,6 +86,39 @@ class Draw
             $g->save();
 
             return $winner;
+        });
+    }
+
+    /**
+     * The winner forfeited: record it and promote the next-lowest hash.
+     *
+     * The seed and its commitment are untouched — only the exclusion list
+     * grows, so the new winner is still the one the original draw would have
+     * produced had the forfeiting entrant never entered. Returns the new
+     * winner's user-id, or null when no entrants are left.
+     */
+    public static function forfeitAndRedraw(int $giveawayId): ?int
+    {
+        return DB::transaction(function () use ($giveawayId) {
+            $g = Giveaway::whereKey($giveawayId)->lockForUpdate()->first();
+            if (! $g || $g->winner_user_id === null || $g->skill_verified_at !== null) {
+                return null;
+            }
+
+            $forfeited = $g->forfeitedUserIds();
+            if (! in_array((int) $g->winner_user_id, $forfeited, true)) {
+                $forfeited[] = (int) $g->winner_user_id;
+            }
+
+            $userIds = GiveawayEntry::where('giveaway_id', $g->id)
+                ->orderBy('user_id')->pluck('user_id')->all();
+
+            $g->forfeited_user_ids = json_encode($forfeited);
+            $g->winner_user_id = self::winnerFor($g->seed, $userIds, $forfeited);
+            $g->skill_attempts = 0; // the replacement starts with a full set
+            $g->save();
+
+            return $g->winner_user_id;
         });
     }
 

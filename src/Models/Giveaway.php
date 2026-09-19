@@ -16,6 +16,8 @@ class Giveaway extends Model
         'ends_at' => 'datetime',
         'drawn_at' => 'datetime',
         'skill_verified_at' => 'datetime',
+        'skill_attempt_limit' => 'integer',
+        'skill_attempts' => 'integer',
         'active' => 'boolean',
     ];
 
@@ -43,6 +45,23 @@ class Giveaway extends Model
     public function requiresSkillAnswer(): bool
     {
         return trim((string) $this->skill_question) !== '' && trim((string) $this->skill_answer) !== '';
+    }
+
+    /** Entrant ids that forfeited this prize, oldest first. Published. */
+    public function forfeitedUserIds(): array
+    {
+        $ids = json_decode((string) $this->forfeited_user_ids, true);
+
+        return is_array($ids) ? array_values(array_map('intval', $ids)) : [];
+    }
+
+    /**
+     * Wrong answers the winner may give before forfeiting; 0 = unlimited, and
+     * nothing is ever redrawn.
+     */
+    public function skillAttemptLimit(): int
+    {
+        return $this->requiresSkillAnswer() ? max(0, (int) $this->skill_attempt_limit) : 0;
     }
 
     /** Is the winner still owed the skill-testing question? */
