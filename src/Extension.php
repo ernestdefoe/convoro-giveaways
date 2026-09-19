@@ -140,7 +140,9 @@ class Extension extends ServiceProvider
                 'id' => $g->id, 'title' => $g->title, 'prize' => $g->prize,
                 'description' => $g->description, 'image' => self::safeImage($g->image_path),
                 'rules' => $g->rules,
-                // The question is public; the expected answer never leaves the server.
+                // Published with the rules so entrants can read it up front; the
+                // winner answers it after the draw, and the expected answer
+                // never leaves the server.
                 'skillQuestion' => $g->requiresSkillAnswer() ? $g->skill_question : null,
                 'endsAt' => optional($g->ends_at)->toIso8601String(),
                 'entries' => $entries, 'entered' => $entered,
@@ -155,24 +157,42 @@ class Extension extends ServiceProvider
             if ($g->hasEnded()) {
                 return response()->json(['ok' => false, 'message' => 'This giveaway has ended.'], 422);
             }
-            // Where required, entry is only valid once the skill-testing question
-            // is answered correctly — that is what keeps it a game of skill
-            // rather than a pure lottery.
-            if ($g->requiresSkillAnswer() && ! $g->skillAnswerMatches($request->input('answer'))) {
-                return response()->json([
-                    'ok' => false,
-                    'skillQuestion' => $g->skill_question,
-                    'message' => trim((string) $request->input('answer')) === ''
-                        ? 'Answer the skill-testing question to enter.'
-                        : 'That answer isn\'t right — try again.',
-                ], 422);
-            }
             GiveawayEntry::updateOrCreate(
                 ['giveaway_id' => $id, 'user_id' => $request->user()->id],
                 ['created_at' => now()],
             );
 
             return response()->json(['ok' => true, 'entries' => $g->entries()->count()]);
+        });
+
+        // Claim (auth): the drawn winner answers the skill-testing question.
+        // The question qualifies the AWARD, not the entry, so this is the only
+        // place an answer is ever checked.
+        \Illuminate\Support\Facades\Route::middleware(['web', 'auth'])->post('/api/ext/giveaways/{id}/claim', function (Request $request, int $id) {
+            $g = Giveaway::find($id);
+            abort_if(! $g, 404);
+            if ((int) $g->winner_user_id !== (int) $request->user()->id) {
+                return response()->json(['ok' => false, 'message' => 'You are not the winner of this giveaway.'], 403);
+            }
+            if ($g->skill_verified_at) {
+                return response()->json(['ok' => true, 'verified' => true]);
+            }
+            if (! $g->requiresSkillAnswer()) {
+                return response()->json(['ok' => false, 'message' => 'This giveaway has no skill-testing question.'], 422);
+            }
+            $answer = $request->input('answer');
+            if (! $g->skillAnswerMatches(is_string($answer) ? $answer : null)) {
+                return response()->json([
+                    'ok' => false,
+                    'message' => trim((string) $answer) === ''
+                        ? 'Answer the skill-testing question to claim your prize.'
+                        : 'That answer isn\'t right — check the question and try again.',
+                ], 422);
+            }
+            $g->skill_verified_at = now();
+            $g->save();
+
+            return response()->json(['ok' => true, 'verified' => true]);
         });
 
         // Public pages: giveaways index + per-giveaway fairness verifier.
@@ -198,6 +218,8 @@ class Extension extends ServiceProvider
                         'active' => $g->active, 'entries' => $g->entries()->count(),
                         'hasRules' => trim((string) $g->rules) !== '',
                         'skillQuestion' => $g->requiresSkillAnswer() ? $g->skill_question : null,
+                        'awaitingSkill' => $g->awaitingSkillAnswer(),
+                        'skillVerifiedAt' => optional($g->skill_verified_at)->toIso8601String(),
                         'winner' => $g->winner_user_id ? optional(User::find($g->winner_user_id))->name : null,
                         // The commitment is always public; the raw seed is only
                         // revealed after the draw.
@@ -304,7 +326,7 @@ class Extension extends ServiceProvider
         if ($g->requiresSkillAnswer()) {
             $blocks .= '<div class="gv-skill"><span class="gv-k">Skill-testing question</span>'
                 .'<div class="gv-skill-q">'.self::text($g->skill_question).'</div>'
-                .'<span class="gv-note">Entrants must answer this correctly for their entry to count.</span></div>';
+                .'<span class="gv-note">The drawn winner must answer this correctly before the prize is awarded.</span></div>';
         }
         if (trim((string) $g->rules) !== '') {
             $blocks .= '<div class="gv-rules-body">'.self::text($g->rules).'</div>';
@@ -317,8 +339,85 @@ class Extension extends ServiceProvider
             .'<summary class="gv-rules-s">📋 Official rules</summary>'.$blocks.'</details>';
     }
 
+    /**
+     * Panel shown to a logged-in winner who has not yet answered the
+     * skill-testing question. Until they do, the prize isn't awarded — the
+     * question qualifies the award, which is why it is asked here rather than
+     * at entry.
+     */
+    private static function winnerPanels(): array
+    {
+        $user = Auth::user();
+        if (! $user) {
+            return ['', ''];
+        }
+
+        $pending = Giveaway::where('winner_user_id', $user->id)
+            ->whereNull('skill_verified_at')
+            ->whereNotNull('drawn_at')
+            ->orderByDesc('drawn_at')
+            ->get()
+            ->filter(fn (Giveaway $g) => $g->requiresSkillAnswer());
+
+        if ($pending->isEmpty()) {
+            return ['', ''];
+        }
+
+        $html = '';
+        foreach ($pending as $g) {
+            $html .= '<div class="gv-won" data-id="'.(int) $g->id.'">'
+                .'<div class="gv-won-h">🎉 You won — '.self::e($g->title).'</div>'
+                .'<div class="gv-prize">🏆 '.self::e($g->prize).'</div>'
+                .'<p class="gv-won-sub">Before your prize can be awarded, answer this skill-testing question.</p>'
+                .'<div class="gv-skill-q">'.self::text($g->skill_question).'</div>'
+                .'<div class="gv-won-row"><input class="gv-ans" type="text" autocomplete="off" placeholder="Your answer">'
+                .'<button type="button" class="gv-btn gv-btn-p gv-claim">Claim prize</button></div>'
+                .'<div class="gv-won-msg"></div></div>';
+        }
+
+        $js = <<<'JS'
+        (function () {
+          function csrf() { var m = document.querySelector('meta[name="csrf-token"]'); return m ? m.getAttribute('content') : ''; }
+          document.querySelectorAll('.gv-won').forEach(function (card) {
+            var input = card.querySelector('.gv-ans');
+            var btn = card.querySelector('.gv-claim');
+            var msg = card.querySelector('.gv-won-msg');
+            function claim() {
+              var answer = (input.value || '').trim();
+              if (!answer) { msg.className = 'gv-won-msg gv-bad'; msg.textContent = 'Answer the skill-testing question to claim your prize.'; input.focus(); return; }
+              btn.disabled = true; btn.textContent = 'Checking…';
+              fetch('/api/ext/giveaways/' + card.getAttribute('data-id') + '/claim', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-CSRF-TOKEN': csrf() },
+                credentials: 'same-origin',
+                body: JSON.stringify({ answer: answer })
+              }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+                .then(function (x) {
+                  if (x.ok && x.d.ok) {
+                    card.classList.add('gv-won-done');
+                    card.querySelector('.gv-won-row').remove();
+                    msg.className = 'gv-won-msg gv-ok';
+                    msg.textContent = '✓ Correct — your prize is confirmed. It now shows as answered on the giveaways panel.';
+                  } else {
+                    btn.disabled = false; btn.textContent = 'Claim prize';
+                    msg.className = 'gv-won-msg gv-bad';
+                    msg.textContent = (x.d && x.d.message) || 'Could not check that answer.';
+                    input.focus();
+                  }
+                }).catch(function () { btn.disabled = false; btn.textContent = 'Claim prize'; });
+            }
+            btn.addEventListener('click', claim);
+            input.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); claim(); } });
+          });
+        })();
+        JS;
+
+        return [$html, $js];
+    }
+
     private static function indexPage(): \Inertia\Response
     {
+        [$wonHtml, $wonJs] = self::winnerPanels();
         $active = Giveaway::where('active', true)->orderByDesc('id')->first();
         $past = Giveaway::whereNotNull('drawn_at')->orderByDesc('drawn_at')->limit(20)->get();
         $names = User::whereIn('id', $past->pluck('winner_user_id')->filter()->unique())->pluck('name', 'id');
@@ -353,9 +452,9 @@ class Extension extends ServiceProvider
         $body = '<div class="gv-wrap"><div class="gv-hero"><div class="gv-eyebrow">Giveaways</div>'
             .'<h1 class="gv-h1">Win prizes — provably fair</h1>'
             .'<p class="gv-sub">Enter with one click. Every draw is verifiable: the winning seed is committed up front and revealed at the draw, so anyone can recompute the winner.</p></div>'
-            .$activeHtml.$pastHtml.'</div>';
+            .$wonHtml.$activeHtml.$pastHtml.'</div>';
 
-        return ExtPage::render('Giveaways', $body, self::css());
+        return ExtPage::render('Giveaways', $body, self::css(), $wonJs);
     }
 
     private static function verifyPage(Giveaway $g): \Inertia\Response
@@ -429,7 +528,7 @@ class Extension extends ServiceProvider
             <input id="skill_question" placeholder="What is 12 + 7 × 2?">
             <label class="gv-f">Correct answer</label>
             <input id="skill_answer" placeholder="26">
-            <p class="gv-help">Where a pure game of chance isn't allowed, entrants must answer this correctly before their entry counts. Matching ignores case, spaces and thousands separators.</p>
+            <p class="gv-help">Where a pure game of chance isn't allowed, the drawn winner must answer this correctly before the prize is awarded — entering stays one click. Matching ignores case, spaces and thousands separators.</p>
             <label class="gv-f">Image (optional)</label>
             <div class="gv-img-row"><div class="gv-img-prev" id="img-prev"></div>
               <input type="file" id="img-file" accept="image/*" hidden>
@@ -458,7 +557,9 @@ class Extension extends ServiceProvider
             var status=g.drawnAt?'drawn':(g.active?'on':'off');
             var win=g.winner?(' · winner: <span class="gv-win">'+esc(g.winner)+'</span>'):'';
             var seedLine=g.seed?('seed: '+esc(g.seed)):('commit: '+esc(g.seedHash));
-            var extras=(g.hasRules?' · <span class="gv-flag">rules</span>':'')+(g.skillQuestion?' · <span class="gv-flag">skill question</span>':'');
+            var skill=g.skillQuestion?(g.awaitingSkill?' · <span class="gv-warn">awaiting winner\'s answer</span>'
+              :(g.skillVerifiedAt?' · <span class="gv-win">winner answered ✓</span>':' · <span class="gv-flag">skill question</span>')):'';
+            var extras=(g.hasRules?' · <span class="gv-flag">rules</span>':'')+skill;
             var actions='<a class="gv-btn gv-btn-ghost" href="/giveaways/'+g.id+'/verify" target="_blank">Verify</a>';
             if(!g.drawnAt){actions='<button class="gv-btn gv-btn-ghost" data-act="edit" data-id="'+g.id+'">Edit</button>'
               +'<button class="gv-btn gv-btn-ghost" data-act="draw" data-id="'+g.id+'">Draw winner</button>'
@@ -613,6 +714,19 @@ class Extension extends ServiceProvider
         .gv-form-h{font-size:14px;font-weight:800;color:rgb(var(--c-text));padding-bottom:10px;border-bottom:1px solid rgb(var(--c-border))}
         .gv-create{display:flex;gap:8px;align-items:center}
         .gv-flag{color:rgb(var(--c-primary));font-weight:600}
+        .gv-warn{color:#d97706;font-weight:600}
+        .gv-won{border:1px solid rgb(var(--c-primary)/.45);border-radius:16px;padding:22px;margin-bottom:16px;
+          background:linear-gradient(135deg,rgba(91,91,214,.14),rgba(139,92,246,.09)),rgb(var(--c-surface))}
+        .gv-won-h{font-size:1.2rem;font-weight:800;color:rgb(var(--c-text));margin-bottom:4px}
+        .gv-won-sub{font-size:14px;color:rgb(var(--c-text-2));margin:10px 0 12px}
+        .gv-won .gv-skill-q{font-size:15px;font-weight:700;color:rgb(var(--c-text));margin-bottom:12px}
+        .gv-won-row{display:flex;gap:8px;flex-wrap:wrap}
+        .gv-won-row .gv-ans{flex:1;min-width:200px;font:inherit;font-size:14px;padding:10px 12px;border-radius:10px;
+          border:1px solid rgb(var(--c-border));background:rgb(var(--c-surface-2));color:rgb(var(--c-text))}
+        .gv-won-row .gv-ans:focus{outline:none;border-color:rgb(var(--c-primary))}
+        .gv-won-msg:not(:empty){margin-top:12px;font-size:13.5px;font-weight:600;padding:10px 12px;border-radius:10px}
+        .gv-won-msg.gv-ok{background:rgba(16,185,129,.12);color:#059669}
+        .gv-won-msg.gv-bad{background:rgba(229,72,77,.12);color:#e5484d}
         CSS;
     }
 }

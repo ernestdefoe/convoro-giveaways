@@ -15,6 +15,7 @@ class Giveaway extends Model
     protected $casts = [
         'ends_at' => 'datetime',
         'drawn_at' => 'datetime',
+        'skill_verified_at' => 'datetime',
         'active' => 'boolean',
     ];
 
@@ -38,14 +39,22 @@ class Giveaway extends Model
         return $this->ends_at !== null && now()->greaterThan($this->ends_at);
     }
 
-    /** Whether entrants must answer a skill-testing question to enter. */
+    /** Whether the drawn winner must answer a skill-testing question. */
     public function requiresSkillAnswer(): bool
     {
         return trim((string) $this->skill_question) !== '' && trim((string) $this->skill_answer) !== '';
     }
 
+    /** Is the winner still owed the skill-testing question? */
+    public function awaitingSkillAnswer(): bool
+    {
+        return $this->winner_user_id !== null
+            && $this->skill_verified_at === null
+            && $this->requiresSkillAnswer();
+    }
+
     /**
-     * Check an entrant's skill-testing answer leniently: case, surrounding
+     * Check the winner's skill-testing answer leniently: case, surrounding
      * whitespace, thousands separators and a trailing full stop are ignored, and
      * two numeric answers are compared as numbers ("7.0" matches "7").
      */

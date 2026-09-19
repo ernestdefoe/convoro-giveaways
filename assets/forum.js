@@ -72,6 +72,10 @@ function render(el, g) {
       q.textContent = g.skillQuestion;
       q.style.cssText = 'padding:9px 11px 0;font-size:12.5px;font-weight:700;color:rgb(var(--c-text,27 32 48))';
       rulesEl.appendChild(q);
+      const note = document.createElement('div');
+      note.textContent = 'The winner must answer this to claim the prize.';
+      note.style.cssText = 'padding:2px 11px 0;font-size:11.5px;color:rgb(var(--c-muted,138 144 166))';
+      rulesEl.appendChild(note);
     }
     if (g.rules) {
       const r = document.createElement('div');
@@ -79,24 +83,6 @@ function render(el, g) {
       r.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;padding:9px 11px 11px;font-size:12.5px;line-height:1.6;max-height:240px;overflow:auto;color:rgb(var(--c-text-2,74 81 104))';
       rulesEl.appendChild(r);
     }
-  }
-
-  // Skill-testing question: shown inline so entering stays one step.
-  let skillWrap = null;
-  let answerInput = null;
-  if (g.skillQuestion && g.authed && !g.entered) {
-    skillWrap = document.createElement('div');
-    skillWrap.style.cssText = 'margin-bottom:10px';
-    const label = document.createElement('label');
-    label.textContent = g.skillQuestion;
-    label.style.cssText = 'display:block;font-size:12.5px;font-weight:700;color:rgb(var(--c-text,27 32 48));margin-bottom:5px';
-    answerInput = document.createElement('input');
-    answerInput.type = 'text';
-    answerInput.placeholder = 'Your answer';
-    answerInput.autocomplete = 'off';
-    answerInput.style.cssText = 'width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:8px 10px;border-radius:var(--c-radius-btn,9px);border:1px solid rgb(var(--c-border,230 232 240));background:rgb(var(--c-surface,255 255 255));color:rgb(var(--c-text,27 32 48))';
-    skillWrap.appendChild(label);
-    skillWrap.appendChild(answerInput);
   }
 
   const err = document.createElement('div');
@@ -107,7 +93,6 @@ function render(el, g) {
   btn.style.cssText = 'width:100%;border:0;border-radius:var(--c-radius-btn,9px);padding:10px;font-weight:700;cursor:pointer;background:rgb(var(--c-primary,91 91 214));color:#fff';
 
   function setEntered() {
-    if (skillWrap) skillWrap.style.display = 'none';
     err.style.display = 'none';
     btn.textContent = '✓ You\'re entered';
     btn.disabled = true;
@@ -124,33 +109,21 @@ function render(el, g) {
   } else {
     btn.textContent = 'Enter giveaway';
     const enter = () => {
-      const answer = answerInput ? answerInput.value.trim() : '';
-      if (answerInput && !answer) {
-        err.textContent = 'Answer the skill-testing question to enter.';
-        err.style.display = 'block';
-        answerInput.focus();
-        return;
-      }
       err.style.display = 'none';
       btn.disabled = true; btn.textContent = 'Entering…';
       fetch(`/api/ext/giveaways/${g.id}/enter`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-CSRF-TOKEN': csrf() },
         credentials: 'same-origin',
-        body: JSON.stringify({ answer }),
       }).then((r) => r.json()).then((d) => {
         if (d.ok) { meta.textContent = entryLabel(d.entries) + (g.endsAt ? ' · ends ' + new Date(g.endsAt).toLocaleDateString() : ''); setEntered(); }
         else {
           if (d.message) { err.textContent = d.message; err.style.display = 'block'; }
           btn.disabled = false; btn.textContent = 'Enter giveaway';
-          if (answerInput) answerInput.focus();
         }
       }).catch(() => { btn.disabled = false; btn.textContent = 'Enter giveaway'; });
     };
     btn.addEventListener('click', enter);
-    if (answerInput) {
-      answerInput.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); enter(); } });
-    }
   }
 
   body.appendChild(title);
@@ -163,7 +136,6 @@ function render(el, g) {
   }
   if (rulesEl) body.appendChild(rulesEl);
   body.appendChild(meta);
-  if (skillWrap) body.appendChild(skillWrap);
   body.appendChild(btn);
   body.appendChild(err);
 

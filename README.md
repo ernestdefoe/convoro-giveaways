@@ -22,11 +22,13 @@ Free, first-party, MIT-licensed. Requires Convoro core **≥ 1.39.6**.
   selected, deadlines, sponsor, odds) with each giveaway. They appear on the
   Giveaways page, in the sidebar widget and on the giveaway's permanent
   verification page, so the rules stay on the record after the draw.
-- **Skill-testing question** — optionally require entrants to answer a question
-  correctly before their entry counts, for jurisdictions (Canada among them)
-  where a pure game of chance would be an illegal lottery. Answers are checked
-  server-side; case, spaces and thousands separators are ignored, and numeric
-  answers compare as numbers.
+- **Skill-testing question** — optionally require the **drawn winner** to answer
+  a question correctly before the prize is awarded, for jurisdictions (Canada
+  among them) where a pure game of chance would be an illegal lottery. Entering
+  stays one click; the winner answers on the Giveaways page after the draw, and
+  the giveaway records when they passed. Answers are checked server-side; case,
+  spaces and thousands separators are ignored, and numeric answers compare as
+  numbers.
 - **Public Giveaways page** — the active giveaway plus a list of past winners,
   each linking to its fairness proof.
 - **Themed admin manager** — create, edit, draw, open/close and delete giveaways
@@ -39,12 +41,14 @@ Free, first-party, MIT-licensed. Requires Convoro core **≥ 1.39.6**.
 1. **Commit** — on creation a CSPRNG seed is generated; only `sha256(seed)` is
    published. The operator cannot change the seed afterwards without breaking the
    commitment.
-2. **Enter** — members enter; entries are one-per-user and counted publicly. If
-   a skill-testing question is set, only a correct answer creates an entry.
+2. **Enter** — members enter; entries are one-per-user and counted publicly.
 3. **Reveal & draw** — the seed is revealed and the winner is the entrant
    minimising `sha256(seed : user-id)` over the (published) entrant list.
 4. **Verify** — anyone can recompute it from the revealed seed + entrant ids and
    confirm `sha256(seed)` equals the original commitment.
+5. **Claim** — if a skill-testing question is set, the winner answers it before
+   the prize is awarded. The draw itself is unaffected: the question qualifies
+   the award, not the entry.
 
 ## Install
 
